@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>token-monitor 用量面板</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 28px; background: #16181d; color: #d6dce5;
+         font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif; }
+  h1 { font-size: 18px; margin: 0 0 4px; font-weight: 600; }
+  h2 { font-size: 13px; margin: 26px 0 10px; color: #8a94a6; font-weight: 600; letter-spacing: .04em; }
+  .sub { color: #8a94a6; font-size: 12px; margin-bottom: 22px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #35c759; margin-right: 6px;vertical-align: middle;}
+  .dot.off { background: #ff453a; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .card { background: #1e2128; border: 1px solid #2a2f3a; border-radius: 10px; padding: 14px 16px; }
+  .card .k { color: #8a94a6; font-size: 12px; margin-bottom: 6px; }
+  .card .v { font-size: 24px; font-weight: 700; color: #4ea1ff; font-variant-numeric: tabular-nums; }
+  .card .v.small { font-size: 18px; color: #d6dce5; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: right; padding: 7px 10px; border-bottom: 1px solid #23272f; font-variant-numeric: tabular-nums; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: #8a94a6; font-weight: 500; font-size: 12px; }
+  td.mono { color: #8a94a6; font-size: 12px; }
+  .muted { color: #6e7687; }
+</style>
+</head>
+<body>
+  <h1><span id="dot" class="dot"></span>token-monitor 用量面板</h1>
+  <div class="sub" id="sub">正在连接本地代理…</div>
+
+  <div class="cards">
+    <div class="card"><div class="k">总 TOKEN</div><div class="v" id="total">0</div></div>
+    <div class="card"><div class="k">输入 / 输出</div><div class="v small" id="io">0 / 0</div></div>
+    <div class="card"><div class="k">请求数</div><div class="v small" id="reqs">0</div></div>
+    <div class="card"><div class="k">今日累计</div><div class="v small" id="today">0</div></div>
+    <div class="card"><div class="k">输出速率</div><div class="v small" id="rate">0 tok/s</div></div>
+    <div class="card"><div class="k">账户余额</div><div class="v small" id="balance">—</div><div class="k" id="balanceSub" style="margin-top:6px"></div></div>
+    <div class="card"><div class="k">累计成本</div><div class="v small" id="cost">—</div><div class="k" id="lastCost" style="margin-top:6px"></div></div>
+  </div>
+
+  <h2>当前价格 <span class="muted" id="priceSub" style="font-weight:400"></span></h2>
+  <table id="price"><thead><tr><th>模型</th><th>输入（未命中缓存）</th><th>输入（命中缓存）</th><th>输出</th><th>时段</th></tr></thead><tbody></tbody></table>
+
+  <h2>按模型</h2>
+  <table id="models"><thead><tr><th>模型</th><th>请求</th><th>输入</th><th>输出</th><th>合计</th><th>成本</th></tr></thead><tbody></tbody></table>
+
+  <h2>最近请求</h2>
+  <table id="recent"><thead><tr><th>时间</th><th>模型</th><th>输入</th><th>输出</th><th>耗时</th><th>状态</th></tr></thead><tbody></tbody></table>
+
+<script>
+const n = (v) => (v || 0).toLocaleString('zh-CN');
+const t = (ts) => new Date(ts).toLocaleTimeString('zh-CN');
+const money = (cur, v) => (cur === 'CNY' ? '¥' : cur === 'USD' ? '$' : (cur || '')) + v;
+const fmtPrice = (v) => (v == null ? '—' : v >= 1 ? String(Math.round(v * 100) / 100) : String(v));
+// 单次成本可能小到 0.0000x，按数量级决定小数位
+const fmtCost = (v) => (v == null ? '—' : v === 0 ? '0' : Math.abs(v) >= 0.01 ? v.toFixed(4) : v.toFixed(6));
+
+async function tick() {
+  let s;
+  try {
+    s = await (await fetch('/__stats', { cache: 'no-store' })).json();
+    document.getElementById('dot').className = 'dot';
+  } catch {
+    document.getElementById('dot').className = 'dot off';
+    document.getElementById('sub').textContent = '代理离线';
+    return;
+  }
+  document.getElementById('sub').innerHTML =
+    '上游 ' + s.upstream + (s.mock ? ' · mock 模式' : '') +
+    ' · 已运行 ' + Math.round(s.uptimeMs / 60000) + ' 分钟' +
+    (s.totals.estimated ? ' · 其中 ' + s.totals.estimated + ' 次为估算值' : '');
+  document.getElementById('total').textContent = n(s.totals.total);
+  document.getElementById('io').textContent = n(s.totals.prompt) + ' / ' + n(s.totals.completion);
+  document.getElementById('reqs').textContent = n(s.totals.requests) + (s.totals.errors ? '（失败 ' + s.totals.errors + '）' : '');
+  document.getElementById('today').textContent = n(s.today.total);
+  document.getElementById('rate').textContent = (s.rate.completionPerSec || 0) + ' tok/s';
+
+  // 余额
+  const bal = s.balance || {};
+  const balCard = document.getElementById('balance');
+  const balSub = document.getElementById('balanceSub');
+  if (bal.error) {
+    balCard.textContent = '未获取';
+    balCard.style.color = '#ff453a';
+    balSub.textContent = bal.error;
+  } else if (bal.balances && bal.balances.length) {
+    balCard.textContent = bal.balances.map((b) => money(b.currency, b.total)).join(' / ');
+    balCard.style.color = '#35c759';
+    balSub.textContent = bal.balances.map((b) => `${b.currency} 赠金 ${b.granted} / 充值 ${b.toppedUp}`).join('；') +
+      (bal.keySource ? ' · ' + bal.keySource : '');
+  } else {
+    balCard.textContent = '查询中…';
+    balCard.style.color = '';
+    balSub.textContent = '';
+  }
+
+  // 成本
+  document.getElementById('cost').textContent = s.cost.known
+    ? money(s.cost.currency, fmtCost(s.cost.total)) : '价格表未收录';
+  document.getElementById('lastCost').textContent = s.lastCost == null
+    ? '本次：未知' : '本次 ' + money(s.cost.currency, fmtCost(s.lastCost));
+
+  // 当前价格
+  const p = s.price;
+  document.getElementById('priceSub').textContent = p
+    ? `（${p.model} · ${p.tierText}时段${s.peakReason ? ' · ' + s.peakReason : ''} · 每 100 万 token · ${s.pricingLabel || '自定义价'}${s.pricingFetchedText ? ' · ' + s.pricingFetchedText : ''}${s.pricingError ? ' · ' + s.pricingError : ''}）`
+    : '（当前模型未收录价格）';
+  document.querySelector('#price tbody').innerHTML = p
+    ? `<tr><td>${p.model}</td><td>${money(p.currency, fmtPrice(p.inputMiss))}</td><td>${money(p.currency, fmtPrice(p.inputHit))}</td><td>${money(p.currency, fmtPrice(p.output))}</td><td>${p.tierText}</td></tr>`
+    : '<tr><td colspan="5" class="muted">暂无数据</td></tr>';
+
+  document.querySelector('#models tbody').innerHTML = s.byModel.map((m) =>
+    `<tr><td>${m.key}</td><td>${n(m.requests)}</td><td>${n(m.prompt)}</td><td>${n(m.completion)}</td><td>${n(m.total)}</td><td class="mono">${m.costKnown ? money(s.cost.currency, fmtCost(m.cost)) : '—'}</td></tr>`
+  ).join('') || '<tr><td colspan="6" class="muted">暂无数据</td></tr>';
+
+  document.querySelector('#recent tbody').innerHTML = s.recent.map((r) =>
+    `<tr><td class="mono">${t(r.ts)}</td><td>${r.model}</td><td>${n(r.prompt)}${r.estimated ? '≈' : ''}</td><td>${n(r.completion)}${r.estimated ? '≈' : ''}</td><td class="mono">${r.latencyMs}ms</td><td class="mono">${r.error ? '失败' : (r.stream ? '流式' : '完成')}</td></tr>`
+  ).join('') || '<tr><td colspan="6" class="muted">暂无数据</td></tr>';
+}
+
+tick();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

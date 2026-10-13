@@ -1,0 +1,4 @@
+# 全部文件按原样存储，不做换行符转换。
+# 原因：widget.ps1 / proxy.js / *.md 的字节内容是经过校对的（PowerShell 5.1 对
+# UTF-8 BOM 敏感），一旦被 Git 自动改 CRLF 就可能出问题。改文件请显式指定编码。
+* -text

@@ -1,0 +1,18 @@
+{
+  "name": "token-monitor",
+  "version": "1.1.0",
+  "private": true,
+  "description": "本地 LLM token 用量统计代理 + 桌面悬浮窗（零依赖）",
+  "main": "proxy.js",
+  "scripts": {
+    "start": "node proxy.js",
+    "widget": "node proxy.js --widget",
+    "mock": "node proxy.js --mock",
+    "test": "node test-client.js",
+    "check:dashboard": "node tools/check-dashboard.js",
+    "reset": "node proxy.js --reset"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
