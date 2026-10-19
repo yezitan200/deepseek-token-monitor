@@ -1,5 +1,8 @@
 # token-monitor **V1.2.0**
 
+> **⬇ 下载最新版**：[token-monitor-latest.zip](https://github.com/yezitan200/deepseek-token-monitor/raw/main/dist/token-monitor-latest.zip)
+> —— 这个文件名是固定的，每次发版都被最新版覆盖；想要某个特定版本去 [`dist/`](dist/) 里按版本号拿。
+
 > **导航**：第一次用 → 看下面「三步跑起来」，或直接看 `使用说明.txt`（更短）。
 > 这份 README 也会随分发包一起发出去；想改代码再看项目目录里的 `开发资料夹说明.md` / `维护手册.md`
 > （这两份是作者用的，不随分发包发给别人）。
