@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  token-monitor 启动器的应用程序清单。
+
+  作用只有一件事：让 exe 一运行就自动申请管理员权限（UAC 弹窗点"是"）。
+  为什么要这个：启动器要拉起 / 重启 DSH、代理、悬浮窗；如果它自己是普通权限，
+  就停不掉别处以管理员跑起来的那些进程（UIPI：普通进程杀不掉提权进程），
+  会出现"点了重启没反应"。统一用管理员跑最省事。
+
+  注意：
+  - 这里**故意不写 dpiAware**。启动器现在的 DPI 处理是"进程不感知 + 自己按 Dpi.S() 缩放"，
+    清单里一加 dpiAware 就会变成双重缩放，界面会变形。要改 DPI 单独做（见维护手册 9.2d）。
+  - 编译时必须带上这个文件（build-launcher.cmd 里的 /win32manifest），否则 csc 会塞默认的
+    asInvoker 清单，提权就没了。
+-->
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="token-monitor.app" />
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
+    <security>
+      <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+</assembly>

@@ -18,6 +18,11 @@ _tmp-*
 *.log
 latest.log
 
+# 换 exe 时留下的临时副本（token-monitor.old.exe 是上一个版本，别提交）
+token-monitor.old.exe
+token-monitor.new.exe
+token-monitor.test.exe
+
 # 分发包暂存
 dist/*.tmp/
 dist/_stage/

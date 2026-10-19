@@ -87,9 +87,10 @@ namespace TokenMonitorLauncher
 
             string arg = (args.Length > 0 ? args[0] : "").ToLowerInvariant();
 
-            // 这里故意**不**申请管理员权限：
-            // 要求提权会让 Windows SmartScreen 弹"已保护你的电脑 / 无法识别的应用"，
-            // 而 token-monitor 并不需要管理员权限（DSH、代理、悬浮窗都是普通用户级别）。
+            // 提权写在清单里：launcher\app.manifest 的 requireAdministrator，双击就弹 UAC。
+            // 为什么需要：启动器要停掉 / 重启 DSH 和代理，而它们是以管理员跑起来的——
+            // 普通权限的进程杀不掉提权进程（UIPI），表现为"点了重启没反应"。
+            // 代价：每次启动都有 UAC；命令行模式（--check 等）也得在已提权的终端里跑。
 
             if (arg == "--open-dsh" || arg == "--start-monitor" || arg == "--check" ||
                 arg == "--dry-run" || arg == "--start-dsh" || arg == "--dsh-url" ||
@@ -519,7 +520,125 @@ namespace TokenMonitorLauncher
         {
             string skip = Environment.GetEnvironmentVariable("TOKEN_MONITOR_SKIP_DSH");
             if (!string.IsNullOrEmpty(skip) && skip != "0") return false;
-            return FindDshBin() != null || FindDsh() != null;
+            return FindDshBin() != null || FindDsh() != null || FindDshDesktop() != null;
+        }
+
+        // ---- DSH 桌面版（Electron 应用）----
+
+        /// <summary>
+        /// config.json 里的 dshMode：
+        ///   auto（默认） 装了桌面版就用桌面版，否则用 dsh web
+        ///   web          强制用 dsh web（命令行版）
+        ///   desktop      强制用桌面版；没装会报错，不会偷偷退回网页
+        /// 非法值一律按 auto。
+        /// </summary>
+        public static string DshModeSetting()
+        {
+            try
+            {
+                Match m = Regex.Match(ReadConfigText(), "\"dshMode\"\\s*:\\s*\"([^\"]*)\"");
+                if (m.Success)
+                {
+                    string v = m.Groups[1].Value.Trim().ToLowerInvariant();
+                    if (v == "web" || v == "desktop" || v == "auto") return v;
+                }
+            }
+            catch { }
+            return "auto";
+        }
+
+        /// <summary>
+        /// 找 DeepSeek Harness 桌面版的 exe（找不到返回 null）。
+        /// 顺序：config.json 的 dshDesktop（可填 exe，也可填 .lnk）→ 安装包的默认位置。
+        /// 安装包是按用户安装（electron-builder 的 nsis perMachine=false），默认落在
+        /// %LOCALAPPDATA%\Programs\DeepSeek Harness\DeepSeek Harness.exe；
+        /// 也顺手看一眼按机器安装的位置，以及少数版本用的小写目录名。
+        /// </summary>
+        public static string FindDshDesktop()
+        {
+            try
+            {
+                Match m = Regex.Match(ReadConfigText(), "\"dshDesktop\"\\s*:\\s*\"([^\"]*)\"");
+                if (m.Success)
+                {
+                    string custom = m.Groups[1].Value.Trim().Replace("\\\\", "\\");
+                    if (custom.Length > 0 && File.Exists(custom)) return custom;
+                }
+
+                string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                string pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+                string pf86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+                string[] dirs = new string[] {
+                    Path.Combine(local, "Programs", "DeepSeek Harness"),
+                    Path.Combine(local, "Programs", "deepseek-harness"),
+                    Path.Combine(local, "Programs"),
+                    string.IsNullOrEmpty(pf) ? null : Path.Combine(pf, "DeepSeek Harness"),
+                    string.IsNullOrEmpty(pf86) ? null : Path.Combine(pf86, "DeepSeek Harness")
+                };
+                string[] names = new string[] { "DeepSeek Harness.exe", "deepseek-harness.exe", "DSH.exe" };
+                foreach (string dir in dirs)
+                {
+                    if (string.IsNullOrEmpty(dir)) continue;
+                    foreach (string name in names)
+                    {
+                        string f = Path.Combine(dir, name);
+                        if (File.Exists(f)) return f;
+                    }
+                    // 少数安装方式会再套一层同名目录
+                    foreach (string name in names)
+                    {
+                        string f = Path.Combine(dir, "DeepSeek Harness", name);
+                        if (File.Exists(f)) return f;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>桌面版是不是已经在跑（Electron 会开好几个同名进程，看到一个就算）。</summary>
+        public static bool DshDesktopRunning(string exePath)
+        {
+            try
+            {
+                string name = Path.GetFileNameWithoutExtension(exePath);
+                if (string.IsNullOrEmpty(name)) return false;
+                return Process.GetProcessesByName(name).Length > 0;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// 这次启动 DSH 用哪种方式。auto：装了桌面版就用桌面版；web：只用命令行；
+        /// desktop：只认桌面版（没装时 StartDshDesktop 会明确报错）。
+        /// </summary>
+        public static bool DesktopDshPreferred()
+        {
+            string mode = DshModeSetting();
+            if (mode == "web") return false;
+            if (mode == "desktop") return true;
+            return FindDshDesktop() != null;
+        }
+
+        /// <summary>启动 DeepSeek Harness 桌面版（它自己开窗口、自己管 desktop profile）。</summary>
+        public static string StartDshDesktop(Action<string> progress)
+        {
+            string app = FindDshDesktop();
+            if (app == null)
+                return "找不到 DeepSeek Harness 桌面版：请先安装它，或在 config.json 的 dshDesktop 里填 exe 路径";
+            if (app.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && DshDesktopRunning(app))
+                return "DeepSeek Harness 已经在运行";
+            if (progress != null) progress("正在打开 DeepSeek Harness…");
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo(app);
+                psi.UseShellExecute = true;              // .lnk 也交给 shell 打开
+                string dir = Path.GetDirectoryName(app);
+                if (!string.IsNullOrEmpty(dir)) psi.WorkingDirectory = dir;
+                Process.Start(psi);
+            }
+            catch (Exception ex) { return "启动 DeepSeek Harness 失败：" + ex.Message; }
+            return "已启动 DeepSeek Harness（窗口会自己弹出来）";
         }
 
         /// <summary>
@@ -698,6 +817,10 @@ namespace TokenMonitorLauncher
         /// </summary>
         public static string StartDshCaptured(Action<string> progress)
         {
+            // 桌面版：没有 3080 端口这回事，把它拉起来就行（它自己开窗口、自己管 profile）
+            if (DesktopDshPreferred())
+                return StartDshDesktop(progress);
+
             // 受限环境（沙箱）里写不了 ~/.dsh，启动 DSH 只会得到 EPERM：
             // 这种情况直接说清楚，不去启动，也不让用户看一串看不懂的报错。
             if (!HasDshWriteAccess())
@@ -753,28 +876,32 @@ namespace TokenMonitorLauncher
                     return WaitForOtherDsh(progress, "检测到 DSH 正在启动（没有重复启动）");
             }
 
-            // 按手动那套来：打开一个命令行窗口，在里面运行 DSH。
+            // 默认在后台跑、**不开窗口**：日志追加到 data\dsh-web.log，进程跟启动器生死无关。
+            // 需要盯着日志排查时设环境变量 TOKEN_MONITOR_SHOW_CONSOLE=1，就退回"开一个命令行窗口"的老办法。
             // 优先用 node 直接跑入口 js（完全不碰 .cmd / .bat —— 那些文件在这台机器上会弹
             // "打开文件 - 安全警告 / 无法验证发布者"）；找不到 js 才退回 dsh.cmd。
             string bin = FindDshBin();
-            string commandLine;
-            if (bin != null)
+            string dshCmd = bin == null ? FindDsh() : null;
+            if (bin == null && dshCmd == null) return "找不到 DSH，请先安装 DeepSeek Harness";
+            string commandLine = bin != null
+                ? "node \"" + bin + "\" web"
+                : "\"" + dshCmd + "\" web";
+
+            if (ShowConsoleWindows())
             {
                 if (progress != null) progress("正在打开命令行窗口启动 DSH…");
-                commandLine = "/k node \"" + bin + "\" web";
+                ProcessStartInfo vpsi = new ProcessStartInfo("cmd.exe", "/k " + commandLine);
+                vpsi.UseShellExecute = true;                 // 开一个真正的新控制台窗口
+                vpsi.WorkingDirectory = DshWorkDir();        // C:\Users\<用户名>
+                try { Process.Start(vpsi); }
+                catch (Exception ex) { return "打开命令行窗口失败：" + ex.Message; }
             }
             else
             {
-                string dsh = FindDsh();
-                if (dsh == null) return "找不到 DSH，请先安装 DeepSeek Harness";
-                if (progress != null) progress("正在打开命令行窗口启动 DSH…");
-                commandLine = "/k \"\"" + dsh + "\" web\"";
+                if (progress != null) progress("正在后台启动 DSH（不弹窗口）…");
+                try { StartHidden(commandLine, DshWorkDir(), DshLogFile); }
+                catch (Exception ex) { return "启动 DSH 失败：" + ex.Message; }
             }
-            ProcessStartInfo psi = new ProcessStartInfo("cmd.exe", commandLine);
-            psi.UseShellExecute = true;                      // 开一个真正的新控制台窗口
-            psi.WorkingDirectory = DshWorkDir();             // C:\Users\<用户名>
-            try { Process.Start(psi); }
-            catch (Exception ex) { return "打开命令行窗口失败：" + ex.Message; }
 
             Stopwatch sw = Stopwatch.StartNew();
             while (sw.ElapsedMilliseconds < 60000)
@@ -790,12 +917,12 @@ namespace TokenMonitorLauncher
                         SaveSession(captured);
                         try { Process.Start(new ProcessStartInfo(captured) { UseShellExecute = true }); }
                         catch { }
-                        return "DSH 已启动（命令行窗口里），并用令牌链接打开页面";
+                        return "DSH 已启动（后台运行），并用令牌链接打开页面";
                     }
-                    return "DSH 已启动（命令行窗口里），它自己会打开页面；若没弹出，看那个窗口打印的链接";
+                    return "DSH 已启动（后台运行），它自己会打开页面；若没弹出，看 data\\dsh-web.log 里打印的链接";
                 }
             }
-            return "等了 60 秒 3080 还没就绪；请看刚打开的那个命令行窗口里的提示";
+            return "等了 60 秒 3080 还没就绪；请看 data\\dsh-web.log 里的提示";
         }
 
         private static string TryReadLog()
@@ -905,6 +1032,14 @@ namespace TokenMonitorLauncher
         public static string OpenDshWeb(bool dryRun, Action<string> progress, Func<string, bool> confirm)
         {
             if (!DshAvailable()) return "已跳过：这台机器没有 DSH（本应用只用统计代理 + 悬浮窗）";
+
+            // 桌面版没有网页可开：这里的"打开"就是把它叫出来（Electron 单实例，会自己聚焦）
+            if (DesktopDshPreferred())
+            {
+                if (dryRun) return "（演练）会打开 DeepSeek Harness 桌面版";
+                return StartDshDesktop(progress);
+            }
+
             string url = DshWebUrl();
             string host; int port;
             if (!IsListening(url, out host, out port))
@@ -1034,6 +1169,11 @@ namespace TokenMonitorLauncher
                 {
                     // 这台机器没有 DSH：整套流程只剩"统计代理 + 悬浮窗"
                     dshPart = "已跳过 DSH（这台机器没装）";
+                }
+                else if (DesktopDshPreferred())
+                {
+                    // 桌面版不监听 3080，直接把它叫起来；已经在跑就只提示一句
+                    dshPart = StartDshDesktop(progress);
                 }
                 else
                 {
@@ -1217,15 +1357,174 @@ namespace TokenMonitorLauncher
             catch { return "cpu,memory,battery"; }
         }
 
+        /// <summary>
+        /// 是不是要临时看控制台窗口。平时一律不看；排查"服务起不来"时设
+        /// TOKEN_MONITOR_SHOW_CONSOLE=1，DSH 和代理就退回"开一个命令行窗口"的老行为，
+        /// 日志直接打在窗口里。
+        /// </summary>
+        private static bool ShowConsoleWindows()
+        {
+            string v = Environment.GetEnvironmentVariable("TOKEN_MONITOR_SHOW_CONSOLE");
+            return !string.IsNullOrEmpty(v) && v != "0";
+        }
+
+        /// <summary>
+        /// 在后台启动一条命令：**不创建任何控制台窗口**，stdout/stderr 追加到 logPath。
+        /// 为什么用 cmd /c 做重定向、而不是 RedirectStandardOutput：管道属于启动器，
+        /// 启动器一关，子进程再写日志就会拿到 EPIPE 直接退出；重定向到文件则跟启动器生死无关。
+        /// 子进程也不归启动器管，启动器退出后照样活着。
+        /// </summary>
+        private static void StartHidden(string commandLine, string workDir, string logPath)
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(logPath);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            }
+            catch { }
+
+            ProcessStartInfo psi = new ProcessStartInfo("cmd.exe",
+                "/c " + commandLine + " >> \"" + logPath + "\" 2>&1");
+            psi.UseShellExecute = false;                     // 必须是 false，CreateNoWindow 才生效
+            psi.CreateNoWindow = true;                       // 一个窗口都不建（连闪一下都没有）
+            psi.WorkingDirectory = workDir;
+            Process.Start(psi);
+        }
+
+        /// <summary>
+        /// 跟 StartHidden 一样"不弹窗口 + 日志进文件"，但命令的第一个词是**带空格的 exe 路径**。
+        /// cmd 对 /c 后面以引号开头的命令有著名的剥引号规则：必须写成 /c ""exe" args" 才对，
+        /// 否则整条命令会被拆坏（实测：少包一层会 exit=1，什么都不执行）。
+        /// envName/envValue 给子进程加一个环境变量（借桌面版当 Node 时要 ELECTRON_RUN_AS_NODE=1）。
+        /// </summary>
+        private static void StartHiddenExe(string exePath, string args, string workDir, string logPath, string envName, string envValue)
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(logPath);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            }
+            catch { }
+
+            string line = "\"\"" + exePath + "\" " + args + " >> \"" + logPath + "\" 2>&1\"";
+            ProcessStartInfo psi = new ProcessStartInfo("cmd.exe", "/c " + line);
+            psi.UseShellExecute = false;
+            psi.CreateNoWindow = true;
+            psi.WorkingDirectory = workDir;
+            if (!string.IsNullOrEmpty(envName)) psi.EnvironmentVariables[envName] = envValue;
+            Process.Start(psi);
+        }
+
+        /// <summary>
+        /// 找能跑 proxy.js 的 Node（找不到返回 null）。顺序：
+        ///   1) config.json 的 nodePath（明确指定）
+        ///   2) PATH 里的 node.exe
+        ///   3) DeepSeek Harness 桌面版目录里的 node.exe（有的版本会带一个）
+        ///   4) 桌面版 exe 自己：Electron 开了 runAsNode 的话，设 ELECTRON_RUN_AS_NODE=1 就当 node 用
+        /// viaElectron = true 表示返回的是桌面版 exe，调用方要带上那个环境变量。
+        /// </summary>
+        public static string FindNodeExe(out bool viaElectron)
+        {
+            viaElectron = false;
+            try
+            {
+                Match m = Regex.Match(ReadConfigText(), "\"nodePath\"\\s*:\\s*\"([^\"]*)\"");
+                if (m.Success)
+                {
+                    string p = m.Groups[1].Value.Trim().Replace("\\\\", "\\");
+                    if (p.Length > 0 && File.Exists(p)) return p;
+                }
+            }
+            catch { }
+
+            try
+            {
+                string path = Environment.GetEnvironmentVariable("PATH");
+                if (!string.IsNullOrEmpty(path))
+                {
+                    foreach (string raw in path.Split(';'))
+                    {
+                        string dir = raw.Trim().Trim('"');
+                        if (dir.Length == 0) continue;
+                        try
+                        {
+                            string f = Path.Combine(dir, "node.exe");
+                            if (File.Exists(f)) return f;
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+
+            string desktop = FindDshDesktop();
+            if (!string.IsNullOrEmpty(desktop) && desktop.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    string dir = Path.GetDirectoryName(desktop);
+                    string[] probes = new string[] {
+                        Path.Combine(dir, "node.exe"),
+                        Path.Combine(dir, "resources", "node.exe"),
+                        Path.Combine(dir, "resources", "runtime", "node.exe"),
+                        Path.Combine(dir, "runtime", "node.exe")
+                    };
+                    foreach (string p in probes) { if (File.Exists(p)) return p; }
+                    string nested = FindFileUnder(Path.Combine(dir, "resources"), "node.exe", 2);
+                    if (nested != null) return nested;
+                }
+                catch { }
+                viaElectron = true;
+                return desktop;
+            }
+            return null;
+        }
+
+        /// <summary>在 dir 底下按层找某个文件名（depth 限制层数，免得在 node_modules 里翻太久）。</summary>
+        private static string FindFileUnder(string dir, string fileName, int depth)
+        {
+            try
+            {
+                if (depth < 0 || string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return null;
+                string direct = Path.Combine(dir, fileName);
+                if (File.Exists(direct)) return direct;
+                foreach (string sub in Directory.GetDirectories(dir))
+                {
+                    string found = FindFileUnder(sub, fileName, depth - 1);
+                    if (found != null) return found;
+                }
+            }
+            catch { }
+            return null;
+        }
+
         /// <summary>直接起 node 跑 proxy.js（不经过 start.cmd，和 StartMonitor 里那套一致）。</summary>
         private static void LaunchProxyProcess()
         {
-            ProcessStartInfo psi = new ProcessStartInfo("cmd.exe",
-                "/c start \"token-monitor proxy\" /min cmd /c \"node proxy.js >> data\\proxy.log 2>&1\"");
-            psi.UseShellExecute = true;                      // 交给 shell 创建独立控制台，进程能独立存活
-            psi.WindowStyle = ProcessWindowStyle.Hidden;
-            psi.WorkingDirectory = AppDir;
-            Process.Start(psi);
+            if (ShowConsoleWindows())
+            {
+                // 老行为：一个最小化的控制台窗口，能肉眼看到代理还活着（排查用）
+                ProcessStartInfo psi = new ProcessStartInfo("cmd.exe",
+                    "/c start \"token-monitor proxy\" /min cmd /c \"node proxy.js >> data\\proxy.log 2>&1\"");
+                psi.UseShellExecute = true;                  // 交给 shell 创建独立控制台，进程能独立存活
+                psi.WindowStyle = ProcessWindowStyle.Hidden;
+                psi.WorkingDirectory = AppDir;
+                Process.Start(psi);
+                return;
+            }
+
+            string log = Path.Combine(AppDir, "data", "proxy.log");
+            bool viaElectron = false;
+            string node = FindNodeExe(out viaElectron);
+            if (node != null)
+            {
+                // 找到具体路径就写死它：PATH 里没有 node、只有桌面版的机器也能跑代理
+                if (viaElectron) StartHiddenExe(node, "proxy.js", AppDir, log, "ELECTRON_RUN_AS_NODE", "1");
+                else StartHiddenExe(node, "proxy.js", AppDir, log, null, null);
+                return;
+            }
+            // 实在找不到：照旧交给 PATH 里的 node，错误会写进 data\proxy.log
+            StartHidden("node proxy.js", AppDir, log);
         }
 
         /// <summary>
@@ -1454,11 +1753,19 @@ namespace TokenMonitorLauncher
                         : (Core.FindDshBin() != null
                             ? "node \"" + Core.FindDshBin() + "\" web（不经过 .cmd）"
                             : "dsh.cmd（退回命令行脚本）")));
+                    Console.WriteLine("DSH 模式   : " + Core.DshModeSetting()
+                        + (Core.DesktopDshPreferred() ? "（这次会用桌面版）" : "（这次会用网页版）"));
+                    Console.WriteLine("DSH 桌面版 : " + (Core.FindDshDesktop() ?? "（没找到，可用 dshDesktop 指定）"));
                     Console.WriteLine("config.json: " + (Core.FindFile("config.json") ?? "（未找到）"));
                     Console.WriteLine("API Key    : " + Core.MaskKey(Core.CurrentApiKey())
                         + (Core.NeedsApiKeySetup() ? "（还没绑过，下次打开启动器会提示填写）" : ""));
                     Console.WriteLine("DSH Web    : " + Core.DshWebUrl() + "  " + (Core.PortOpen("127.0.0.1", 3080) ? "在线" : "离线"));
                     Console.WriteLine("代理 8788  : " + (Core.ProxyAlive() ? "在线" : "离线"));
+                    bool viaElectron = false;
+                    string nodeExe = Core.FindNodeExe(out viaElectron);
+                    Console.WriteLine("Node 运行时: " + (nodeExe == null
+                        ? "（没找到；代理会用 PATH 里的 node，没有就起不来，可用 nodePath 指定）"
+                        : nodeExe + (viaElectron ? "（桌面版 exe + ELECTRON_RUN_AS_NODE）" : "")));
                     Console.WriteLine("写 ~/.dsh  : " + (Core.HasDshWriteAccess() ? "可以（不是受限环境）" : "被拒（受限环境！从桌面快捷方式启动）"));
                     return 0;
                 }
@@ -2667,6 +2974,14 @@ namespace TokenMonitorLauncher
             statusDsh.AutoSize = true;
             Controls.Add(statusDsh);
 
+            // 桌面版：按钮和状态行换个说法（"网页"对桌面版没意义）
+            if (Core.DesktopDshPreferred())
+            {
+                btnWeb.Text = "一键启动：DeepSeek Harness + 统计悬浮窗";
+                btnStart.Text = "打开 DeepSeek Harness";
+                statusDsh.Text = "DSH 桌面版 ●";
+            }
+
             statusProxy.Text = "代理 ●";
             statusProxy.ForeColor = Color.FromArgb(155, 155, 155);
             statusProxy.BackColor = Color.Transparent;
@@ -2908,8 +3223,18 @@ namespace TokenMonitorLauncher
             bool proxy = Core.ProxyAlive();
             if (Core.DshAvailable())
             {
-                statusDsh.Text = "DSH Web " + (dsh ? "● 在线" : "○ 离线");
-                statusDsh.ForeColor = dsh ? Color.FromArgb(108, 203, 95) : Color.FromArgb(155, 155, 155);
+                if (Core.DesktopDshPreferred())
+                {
+                    string desk = Core.FindDshDesktop();
+                    bool running = desk != null && Core.DshDesktopRunning(desk);
+                    statusDsh.Text = "DSH 桌面版 " + (running ? "● 运行中" : "○ 未运行");
+                    statusDsh.ForeColor = running ? Color.FromArgb(108, 203, 95) : Color.FromArgb(155, 155, 155);
+                }
+                else
+                {
+                    statusDsh.Text = "DSH Web " + (dsh ? "● 在线" : "○ 离线");
+                    statusDsh.ForeColor = dsh ? Color.FromArgb(108, 203, 95) : Color.FromArgb(155, 155, 155);
+                }
             }
             else
             {

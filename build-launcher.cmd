@@ -15,6 +15,7 @@ echo е§дкБрвы token-monitor.exe ...
 "%CSC%" /nologo /target:winexe /platform:anycpu /optimize+ ^
   /out:token-monitor.exe ^
   /win32icon:deepseek.ico ^
+  /win32manifest:launcher\app.manifest ^
   /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll ^
   launcher\Launcher.cs
 
